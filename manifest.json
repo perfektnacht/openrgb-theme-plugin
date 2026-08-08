@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "perfektnacht.openrgb-theme",
+  "name": "OpenRGB Theme Sync",
+  "version": "1.0.0",
+  "author": "perfektnacht",
+  "description": "Paints every OpenRGB device with the current Omarchy theme's accent colour",
+  "kinds": [
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

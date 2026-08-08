@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Paint every OpenRGB device with a single colour derived from the Omarchy theme.
+
+Reads the active theme's `accent` unless a colour is given explicitly, applies a
+saturation floor so the result survives the trip to an LED, and pushes it to all
+devices in Direct mode.
+
+Why the saturation floor: RGB LEDs desaturate hard at brightness, so a pastel
+that reads as blue on a monitor renders as dim white on a keyboard. Roughly a
+third of the stock themes ship an accent below 0.35 saturation. Raising S while
+preserving H keeps each theme recognisably itself without going neon.
+
+Greys (S == 0, e.g. the `vantablack` and `white` themes) are left uncoloured on
+purpose -- there is no hue to recover, and white is the honest answer there.
+"""
+
+import argparse
+import colorsys
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+
+THEME_COLORS = os.path.expanduser(
+    "~/.local/state/omarchy/current/theme/colors.toml"
+)
+SHELL_CONFIG = os.path.expanduser("~/.config/omarchy/shell.json")
+PLUGIN_ID = "perfektnacht.openrgb-theme"
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 6742
+
+DEFAULTS = {
+    "saturate": True,
+    "minSaturation": 0.7,
+    "minValue": 1.0,
+    "brightness": None,
+}
+
+
+def settings():
+    """Read this plugin's knobs from its shell.json entry.
+
+    Config lives here rather than in the QML service on purpose. The service
+    shells out to this script on every apply, so reading the file here means the
+    settings are always current without a file watcher -- and Quickshell's
+    FileView misses truncate-and-rewrite updates (`cp`, and some editors),
+    which made the watched version silently serve stale config.
+    """
+    values = dict(DEFAULTS)
+    try:
+        with open(SHELL_CONFIG) as handle:
+            config = json.load(handle)
+    except (OSError, ValueError):
+        return values
+
+    entries = config.get("plugins")
+    if not isinstance(entries, list):
+        return values
+
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("id") != PLUGIN_ID:
+            continue
+        if isinstance(entry.get("saturate"), bool):
+            values["saturate"] = entry["saturate"]
+        for key in ("minSaturation", "minValue"):
+            if isinstance(entry.get(key), (int, float)):
+                values[key] = float(entry[key])
+        if isinstance(entry.get("brightness"), int):
+            values["brightness"] = entry["brightness"]
+        break
+
+    return values
+
+
+def theme_accent():
+    """Pull `accent` out of the active theme's colors.toml."""
+    try:
+        with open(THEME_COLORS) as handle:
+            raw = handle.read()
+    except OSError as err:
+        sys.exit(f"cannot read {THEME_COLORS}: {err}")
+
+    match = re.search(r'^\s*accent\s*=\s*"([^"]+)"', raw, re.M)
+    if not match:
+        sys.exit(f"no accent key in {THEME_COLORS}")
+    return match.group(1)
+
+
+def parse_hex(value):
+    text = value.strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(ch * 2 for ch in text)
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", text):
+        sys.exit(f"not a hex colour: {value}")
+    return tuple(int(text[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+
+def adjust(rgb, min_sat, min_val):
+    """Apply the saturation floor and value floor, preserving hue."""
+    hue, sat, val = colorsys.rgb_to_hsv(*rgb)
+
+    # A pure grey carries no hue. Boosting S would invent a colour the theme
+    # never chose, so only the brightness floor applies.
+    if sat > 0:
+        sat = max(sat, min_sat)
+    val = max(val, min_val)
+
+    return colorsys.hsv_to_rgb(hue, sat, val)
+
+
+def to_hex(rgb):
+    return "".join(f"{round(channel * 255):02X}" for channel in rgb)
+
+
+def server_running():
+    with socket.socket() as probe:
+        probe.settimeout(0.25)
+        return probe.connect_ex((SERVER_HOST, SERVER_PORT)) == 0
+
+
+def apply(hex_color, brightness, dry_run):
+    # No --client flag: bare openrgb autoconnects to a local server already, and
+    # passing --client on top of that connects twice and applies to every device
+    # twice over. Without a server this falls back to direct hardware access,
+    # which still works -- it just pays for a full SMBus rescan each time.
+    command = ["openrgb", "--mode", "direct", "--color", hex_color]
+    if brightness is not None:
+        command += ["--brightness", str(brightness)]
+
+    if dry_run:
+        print(" ".join(command))
+        return 0
+
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+    return result.returncode
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Match OpenRGB devices to the current Omarchy theme."
+    )
+    parser.add_argument(
+        "--color", help="hex colour to apply; defaults to the theme accent"
+    )
+    # Defaults are None so "flag absent" stays distinguishable from "flag set to
+    # the default value"; the shell.json entry fills in whatever is left.
+    parser.add_argument(
+        "--min-sat", type=float,
+        help="saturation floor, 0-1 (default: 0.7)",
+    )
+    parser.add_argument(
+        "--min-val", type=float,
+        help="brightness floor in HSV, 0-1 (default: 1.0)",
+    )
+    parser.add_argument(
+        "--no-saturate", action="store_true",
+        help="send the theme colour untouched",
+    )
+    parser.add_argument(
+        "--brightness", type=int,
+        help="device brightness percentage, 0-100, where supported",
+    )
+    parser.add_argument(
+        "--print-settings", action="store_true",
+        help="print the effective settings as JSON and exit",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="print the openrgb command instead of running it",
+    )
+    parser.add_argument(
+        "--print", dest="print_only", action="store_true",
+        help="print the resolved colour and exit",
+    )
+    args = parser.parse_args()
+
+    # shell.json is the baseline; explicit flags win over it.
+    config = settings()
+    if args.no_saturate:
+        config["saturate"] = False
+    if args.min_sat is not None:
+        config["minSaturation"] = args.min_sat
+    if args.min_val is not None:
+        config["minValue"] = args.min_val
+    if args.brightness is not None:
+        config["brightness"] = args.brightness
+
+    if args.print_settings:
+        print(json.dumps(config))
+        return 0
+
+    if not shutil.which("openrgb"):
+        sys.exit("openrgb is not installed")
+
+    source = args.color or theme_accent()
+    rgb = parse_hex(source)
+
+    if not config["saturate"]:
+        final = to_hex(rgb)
+    else:
+        min_sat = min(max(config["minSaturation"], 0.0), 1.0)
+        min_val = min(max(config["minValue"], 0.0), 1.0)
+        final = to_hex(adjust(rgb, min_sat, min_val))
+
+    if args.print_only:
+        print(f"{source} -> #{final}")
+        return 0
+
+    if not args.dry_run and not server_running():
+        sys.stderr.write(
+            "openrgb server not reachable on "
+            f"{SERVER_HOST}:{SERVER_PORT}; falling back to direct access "
+            "(slow)\n"
+        )
+
+    return apply(final, config["brightness"], args.dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
