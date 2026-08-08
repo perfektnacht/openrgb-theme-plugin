@@ -1,7 +1,8 @@
 # OpenRGB Theme Sync
 
-Paints every OpenRGB device with the current Omarchy theme's accent colour.
-One colour across all devices — no per-device mapping to maintain.
+Paints every OpenRGB device to match the current Omarchy theme. Each stock theme
+has a hand-picked colour; anything else falls back to the theme's accent. One
+colour across all devices — no per-device mapping to maintain.
 
 ## Install
 
@@ -73,11 +74,55 @@ shell pushes new values through IPC whenever the theme changes. The service
 binds to it, debounces 150 ms so one theme switch is one hardware write, and
 shells out to `bin/omarchy-openrgb-theme`.
 
+The accent is only the *trigger*. The helper decides the colour itself, by
+reading the theme slug from `~/.local/state/omarchy/current/theme.name` — which
+`omarchy-theme-set` writes before it pushes the new palette over IPC, so it is
+already current by the time the service fires.
+
 The helper talks to a persistent OpenRGB SDK server, so a theme switch costs
 ~35 ms instead of the several seconds a cold `openrgb` invocation spends
 rescanning the SMBus.
 
+## The colours
+
+Each stock theme gets a colour picked for it, sent to the hardware verbatim:
+
+| Theme | | Theme | |
+|---|---|---|---|
+| catppuccin-latte | `#FFE0A8` vanilla | miasma | `#B2AE9E` gray |
+| catppuccin | `#9B4DFF` purple | nord | `#1E3FB4` dark blue |
+| ethereal | `#3A5BFF` blue | osaka-jade | `#10C878` jade |
+| everforest | `#4FBF5A` green | retro-82 | `#E03A0F` martian red |
+| flexoki-light | `#FFF8EC` white | ristretto | `#8C4A1E` brown |
+| gruvbox | `#A0E85F` light green | rose-pine | `#FF5F9E` pink |
+| hackerman | `#1FE81F` Xbox green | solitude | `#F2E2BC` vanilla |
+| kanagawa | `#F3DD5C` yellow | tokyo-night | `#B78CFF` light purple |
+| last-horizon | `#A9AFB5` gray | vantablack | `#FFFFFF` white |
+| lumon | `#12C9B4` teal | white | `#FFFFFF` white |
+| lupine | `#8B2BE8` purple | matte-black | `#FF9410` golden orange |
+
+These bypass the saturation lift below. A table entry *is* the LED colour, so
+remapping it would overrule the choice — and the `minValue` floor would
+specifically destroy the two entries that depend on being dark, `ristretto`
+brown and `nord` dark blue. Those two will read dim rather than vivid; that is
+what "brown" and "dark blue" cost on a device whose only lever is how hard it
+drives the emitters.
+
+`vantablack` and `white` are deliberately the same white, so the hardware cannot
+tell those two apart. Every other pair is at least 10 dE76 apart; the closest
+are the ones sharing a colour word — `catppuccin` / `lupine` (both purple, 10.1)
+and `catppuccin-latte` / `solitude` (both vanilla, 11.3).
+
+`kanagawa` is the accent pipeline's own output, kept unchanged because it had
+already landed on the right yellow.
+
+Set `themeColors: false` to ignore the table entirely and drive everything off
+the accent, the way this worked before.
+
 ## The saturation floor
+
+This applies to the accent fallback — a custom or third-party theme with no
+table entry — and to an explicit `--color`.
 
 RGB LEDs desaturate hard at brightness: a pastel that reads as blue on a monitor
 renders as dim white on a keyboard. Eight of the 22 stock themes ship an accent
@@ -87,17 +132,16 @@ The helper converts to HSV and remaps S into `[minSaturation, 1]` and V into
 `[minValue, 1]` — a lerp, not a clamp. Hue is untouched, so each theme stays
 recognisably itself:
 
-| Theme | Accent | Applied |
-|---|---|---|
-| solitude | `#798186` (sat 0.10) | `#56A4D5` |
-| tokyo-night | `#7aa2f7` (sat 0.51) | `#3877FC` |
-| kanagawa | `#dcd7ba` (sat 0.15) | `#F3DD5C` |
-| matte-black | `#e68e0d` (sat 0.94) | `#F69506` |
-| vantablack | `#8d8d8d` (sat 0.00) | `#D7D7D7` |
+| Accent | Applied |
+|---|---|
+| `#798186` (sat 0.10) | `#56A4D5` |
+| `#7aa2f7` (sat 0.51) | `#3877FC` |
+| `#dcd7ba` (sat 0.15) | `#F3DD5C` |
+| `#e68e0d` (sat 0.94) | `#F69506` |
+| `#8d8d8d` (sat 0.00) | `#D7D7D7` |
 
 Pure greys keep their neutrality on purpose — there is no hue to recover — but
-they still take the brightness lift, which is what keeps `vantablack` and
-`white` apart.
+they still take the brightness lift.
 
 **Why a lerp and not a clamp.** The first version used `max(S, 0.7)` with V
 pinned to `1.0`. That put every theme on a single ring of the colour solid where
@@ -105,9 +149,10 @@ only hue survived, and 14 of the 22 stock accents live in the 130–240° arc �
 adjacent themes came out visually identical and a theme switch looked like the
 plugin had simply not fired. The worst offenders were `lumon` → `#4DC0FF` and
 `solitude` → `#4DBAFF`, 4.1 dE76 apart. Remapping preserves ordering, so
-anything that differs on screen differs on the hardware: that pair is now 11.4
-apart, and the only remaining sub-5 pair is `vantablack` / `white`, which really
-are just two greys.
+anything that differs on screen differs on the hardware: that pair went to 11.4
+apart. Hand-picked colours are the more direct answer to the same problem, which
+is why the table came later — but the remap still carries every theme this
+plugin has never heard of.
 
 ## Settings
 
@@ -123,6 +168,7 @@ stale config.
 ```json
 {
   "id": "perfektnacht.openrgb-theme",
+  "themeColors": true,
   "saturate": true,
   "minSaturation": 0.55,
   "minValue": 0.65,
@@ -133,7 +179,8 @@ stale config.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `saturate` | `true` | Set `false` to send the theme colour untouched |
+| `themeColors` | `true` | Set `false` to ignore the per-theme table and use the accent for every theme |
+| `saturate` | `true` | Set `false` to send the accent untouched — no effect on table colours, which are never lifted |
 | `minSaturation` | `0.55` | Bottom of the remapped saturation range, 0–1 |
 | `minValue` | `0.65` | Bottom of the remapped HSV brightness range, 0–1 |
 | `brightness` | unset | Device brightness percentage, 0–100, where supported |
@@ -185,15 +232,27 @@ and a B760-P whose JRAINBOW fans would otherwise stay dark:
 ## Commands
 
 ```bash
-omarchy-shell openrgb-theme status    # current accent and last applied colour
+omarchy-shell openrgb-theme status    # where the colour came from, and what landed
 omarchy-shell openrgb-theme apply     # force a reapply
 
 bin/omarchy-openrgb-theme                    # apply now
-bin/omarchy-openrgb-theme --print            # show accent -> applied colour
+bin/omarchy-openrgb-theme --print            # show chosen -> applied colour
 bin/omarchy-openrgb-theme --print-settings   # effective settings as JSON
 bin/omarchy-openrgb-theme --dry-run          # print the openrgb command
 bin/omarchy-openrgb-theme --color 7aa2f7 --print
+bin/omarchy-openrgb-theme --no-theme-colors --print   # force the accent path
 bin/omarchy-openrgb-theme --no-saturate      # flags override shell.json
+```
+
+`--print` and a successful apply both report which path ran — `theme:<slug>` for
+a table hit, `accent` for the fallback, `explicit` for `--color`:
+
+```
+$ bin/omarchy-openrgb-theme --print
+theme:solitude #F2E2BC -> #F2E2BC
+
+$ bin/omarchy-openrgb-theme --no-theme-colors --print
+accent #798186 -> #56A4D5
 ```
 
 ## Editing the service

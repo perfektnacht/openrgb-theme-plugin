@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""Paint every OpenRGB device with a single colour derived from the Omarchy theme.
+"""Paint every OpenRGB device with a single colour chosen for the Omarchy theme.
 
-Reads the active theme's `accent` unless a colour is given explicitly, lifts it
-into a range an LED can actually render, and pushes it to all devices in Direct
-mode.
+Stock themes get a hand-picked colour from THEME_COLORS, sent to the hardware
+verbatim. Anything else -- a custom or third-party theme -- falls back to the
+theme's `accent`, lifted into a range an LED can actually render.
 
-Why lift at all: RGB LEDs desaturate hard at brightness, so a pastel that reads
-as blue on a monitor renders as dim white on a keyboard. Roughly a third of the
-stock themes ship an accent below 0.35 saturation.
+Why hand-pick at all: an accent is chosen to sit on a screen next to text, and
+the qualities that make it work there are exactly the ones an LED cannot
+reproduce. RGB LEDs desaturate hard at brightness, so a pastel that reads as
+blue on a monitor renders as dim white on a keyboard, and roughly a third of the
+stock themes ship an accent below 0.35 saturation. Worse, 14 of the 22 stock
+accents sit in the 130-240 degree arc, so a whole run of themes came out as the
+same blue no matter how the accent was post-processed. A table sidesteps both:
+`hackerman` can be Xbox green and `retro-82` martian red because someone said
+so, not because that is where the arithmetic landed.
 
-Why lift by remapping rather than clamping: a hard `max(S, floor)` throws away
-every distinction below the floor, and with V pinned to 1.0 the entire output
-collapsed onto a single ring where only hue survived. Fourteen of the 22 stock
-accents sit in the 130-240 degree arc, so neighbouring themes came out visually
-identical -- `lumon` and `solitude` landed 4 dE76 apart, which reads as "the
-theme changed but the LEDs didn't". Remapping S and V into [floor, 1] instead
-keeps the ordering, so two themes that differ on screen still differ on the
-hardware.
+Why the table bypasses adjust(): the lift exists to rescue colours that were
+never chosen for LEDs. A table entry *is* the LED choice, so remapping it would
+overrule the only person who knows what the device should look like -- and the
+V floor would specifically destroy the two entries that depend on being dark,
+`ristretto` brown and `nord` dark blue.
 
-Greys (S == 0, e.g. the `vantablack` and `white` themes) keep their hue-less
-neutrality on purpose -- there is no hue to recover -- but still get the
-brightness lift, which is what keeps them apart from each other.
+Why the fallback still lifts: see adjust(). A remap rather than a clamp, so
+accents that differ only in how washed-out they are stay distinguishable
+instead of collapsing onto one ring of the colour solid.
 """
 
 import argparse
@@ -32,10 +35,52 @@ import shutil
 import subprocess
 import sys
 
-THEME_COLORS = os.path.expanduser(
+THEME_COLORS_FILE = os.path.expanduser(
     "~/.local/state/omarchy/current/theme/colors.toml"
 )
+# omarchy-theme-set rewrites this on every switch, before it pushes the new
+# palette to the shell over IPC -- so by the time the service notices the accent
+# change and runs this helper, the name here is already the new one.
+THEME_NAME_FILE = os.path.expanduser(
+    "~/.local/state/omarchy/current/theme.name"
+)
 SHELL_CONFIG = os.path.expanduser("~/.config/omarchy/shell.json")
+
+# One hand-picked colour per stock theme, keyed by the slug in THEME_NAME_FILE.
+# These are LED colours, not screen colours: they go to the hardware untouched,
+# so what is written here is what the devices render.
+#
+# `kanagawa` is the accent pipeline's own output for that theme, kept as-is
+# because it already landed on the right yellow.
+#
+# Two of these are deliberately dark and will read as dim rather than vivid --
+# that is what "brown" and "dark blue" cost on a device whose only lever is how
+# hard it drives the emitters. Raising them would just make them orange and
+# light blue.
+THEME_COLORS = {
+    "catppuccin-latte": "FFE0A8",   # vanilla
+    "catppuccin":       "9B4DFF",   # purple
+    "ethereal":         "3A5BFF",   # blue
+    "everforest":       "4FBF5A",   # green
+    "flexoki-light":    "FFF8EC",   # warm white
+    "gruvbox":          "A0E85F",   # light green
+    "hackerman":        "1FE81F",   # Xbox green
+    "kanagawa":         "F3DD5C",   # yellow, unchanged
+    "last-horizon":     "A9AFB5",   # gray
+    "lumon":            "12C9B4",   # teal
+    "lupine":           "8B2BE8",   # purple
+    "matte-black":      "FF9410",   # golden orange
+    "miasma":           "B2AE9E",   # warm gray
+    "nord":             "1E3FB4",   # dark blue
+    "osaka-jade":       "10C878",   # jade green
+    "retro-82":         "E03A0F",   # martian red
+    "ristretto":        "8C4A1E",   # brown
+    "rose-pine":        "FF5F9E",   # pink
+    "solitude":         "F2E2BC",   # vanilla
+    "tokyo-night":      "B78CFF",   # light purple
+    "vantablack":       "FFFFFF",   # white
+    "white":            "FFFFFF",   # white
+}
 PLUGIN_ID = "perfektnacht.openrgb-theme"
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 6742
@@ -44,6 +89,9 @@ SERVER_PORT = 6742
 SERVER_BANNER = "Connected to server"
 
 DEFAULTS = {
+    # Set false to ignore THEME_COLORS and drive everything off the accent, the
+    # way this worked before the table existed.
+    "themeColors": True,
     "saturate": True,
     # Both are the bottom of a remapped range, not a clamp -- see adjust(). They
     # sit below the old clamp values (0.7 / 1.0) because the headroom above them
@@ -80,8 +128,9 @@ def settings():
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("id") != PLUGIN_ID:
             continue
-        if isinstance(entry.get("saturate"), bool):
-            values["saturate"] = entry["saturate"]
+        for key in ("themeColors", "saturate"):
+            if isinstance(entry.get(key), bool):
+                values[key] = entry[key]
         for key in ("minSaturation", "minValue"):
             if isinstance(entry.get(key), (int, float)):
                 values[key] = float(entry[key])
@@ -100,15 +149,61 @@ def settings():
 def theme_accent():
     """Pull `accent` out of the active theme's colors.toml."""
     try:
-        with open(THEME_COLORS) as handle:
+        with open(THEME_COLORS_FILE) as handle:
             raw = handle.read()
     except OSError as err:
-        sys.exit(f"cannot read {THEME_COLORS}: {err}")
+        sys.exit(f"cannot read {THEME_COLORS_FILE}: {err}")
 
     match = re.search(r'^\s*accent\s*=\s*"([^"]+)"', raw, re.M)
     if not match:
-        sys.exit(f"no accent key in {THEME_COLORS}")
+        sys.exit(f"no accent key in {THEME_COLORS_FILE}")
     return match.group(1)
+
+
+def theme_name():
+    """The active theme's slug, or None if the file is missing.
+
+    Missing is not an error: an install predating theme.name, or a first boot
+    before any theme has been set, just means there is no table entry to find
+    and the accent path takes over.
+    """
+    try:
+        with open(THEME_NAME_FILE) as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+
+    slug = raw.strip().lower().replace(" ", "-")
+    return slug or None
+
+
+def resolve(config):
+    """Decide the colour to send, as (source, final, origin).
+
+    `source` is what was chosen for this theme and `final` is what goes to the
+    LEDs; they differ only on the accent path, where adjust() moves the colour.
+    `origin` names which path ran, purely so --print and the service can say.
+    """
+    if config["themeColors"]:
+        name = theme_name()
+        picked = THEME_COLORS.get(name) if name else None
+        if picked:
+            # Verbatim: a table entry is already the LED colour. See the module
+            # docstring for why adjust() must not touch it.
+            return picked, picked, f"theme:{name}"
+
+    accent = theme_accent()
+    return to_hex(parse_hex(accent)), saturated(accent, config), "accent"
+
+
+def saturated(source, config):
+    """Apply the configured lift to a colour, or pass it through untouched."""
+    rgb = parse_hex(source)
+    if not config["saturate"]:
+        return to_hex(rgb)
+    min_sat = min(max(config["minSaturation"], 0.0), 1.0)
+    min_val = min(max(config["minValue"], 0.0), 1.0)
+    return to_hex(adjust(rgb, min_sat, min_val))
 
 
 def parse_hex(value):
@@ -341,7 +436,13 @@ def main():
         description="Match OpenRGB devices to the current Omarchy theme."
     )
     parser.add_argument(
-        "--color", help="hex colour to apply; defaults to the theme accent"
+        "--color",
+        help="hex colour to apply, bypassing the theme lookup entirely; "
+             "still subject to the saturation lift unless --no-saturate",
+    )
+    parser.add_argument(
+        "--no-theme-colors", action="store_true",
+        help="ignore the per-theme table and drive off the theme accent",
     )
     # Defaults are None so "flag absent" stays distinguishable from "flag set to
     # the default value"; the shell.json entry fills in whatever is left.
@@ -377,6 +478,8 @@ def main():
 
     # shell.json is the baseline; explicit flags win over it.
     config = settings()
+    if args.no_theme_colors:
+        config["themeColors"] = False
     if args.no_saturate:
         config["saturate"] = False
     if args.min_sat is not None:
@@ -393,18 +496,18 @@ def main():
     if not shutil.which("openrgb"):
         sys.exit("openrgb is not installed")
 
-    source = args.color or theme_accent()
-    rgb = parse_hex(source)
-
-    if not config["saturate"]:
-        final = to_hex(rgb)
+    # An explicit --color is a manual override, so it skips the theme lookup but
+    # keeps the lift: someone passing a screen colour by hand wants the same
+    # rescue the accent path gets.
+    if args.color:
+        source = to_hex(parse_hex(args.color))
+        final = saturated(args.color, config)
+        origin = "explicit"
     else:
-        min_sat = min(max(config["minSaturation"], 0.0), 1.0)
-        min_val = min(max(config["minValue"], 0.0), 1.0)
-        final = to_hex(adjust(rgb, min_sat, min_val))
+        source, final, origin = resolve(config)
 
     if args.print_only:
-        print(f"{source} -> #{final}")
+        print(f"{origin} #{source} -> #{final}")
         return 0
 
     # The device listing is only needed to address devices individually, which
@@ -418,10 +521,12 @@ def main():
     # apply() has already written openrgb's own output to stderr on a failure.
     code = apply(final, config["brightness"], assignments, args.dry_run)
 
-    # Report the colour that actually reached the hardware, post-saturation, so
-    # the QML service can record that rather than the raw accent it asked for.
+    # "<origin> <source> <final>" on success. The service used to pass the
+    # colour in and so already knew what it had asked for; now that the helper
+    # chooses, it has to report the choice as well as the result -- those differ
+    # on the accent path, and the difference is the whole saturation story.
     if code == 0 and not args.dry_run:
-        print(final)
+        print(f"{origin} {source} {final}")
 
     return code
 
