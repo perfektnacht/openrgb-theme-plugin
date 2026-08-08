@@ -169,6 +169,22 @@ Note: bare `openrgb` already autoconnects to a local server. Passing `--client`
 *on top of* that connects twice and applies to every device twice over, which is
 why the helper omits it.
 
+## Tested on
+
+Omarchy, OpenRGB 0.9+ (1.0rc3), against these six devices:
+
+| Device | Type | Bus |
+|---|---|---|
+| MSI PRO B760-P WIFI (MS-7D98) | Motherboard | hidraw |
+| ENE DRAM ×2 | DRAM | SMBus |
+| Logitech G Pro RGB Mechanical | Keyboard | hidraw |
+| Logitech G Pro HERO | Mouse | hidraw |
+| Sony DualSense | Gamepad | hidraw |
+
+Nothing here is device-specific — the helper sends one `openrgb --mode direct
+--color` for everything, so any device OpenRGB can drive in Direct mode should
+work. The list is what has actually had a colour put on it, not a limit.
+
 ## Known limits
 
 - **Direct mode doesn't always survive suspend.** Reapply with
