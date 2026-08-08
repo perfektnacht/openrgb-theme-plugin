@@ -52,7 +52,7 @@ DEFAULTS = {
     "minValue": 0.65,
     "brightness": None,
     # Empty by default: Static costs an onboard flash write per theme change,
-    # so which devices need it is a per-machine decision. See apply_static.
+    # so which devices need it is a per-machine decision. See build_command.
     "staticDevices": [],
 }
 
@@ -232,50 +232,83 @@ def match_devices(records, patterns):
     return sorted(matched), missing
 
 
-def apply_static(hex_color, brightness, devices, dry_run):
-    """Re-send the colour as Static to devices that will not hold Direct.
+def build_command(hex_color, brightness, assignments):
+    """One openrgb invocation that gives each device its own mode.
 
-    Direct is a live mode: the device shows the colour only while a host keeps
-    driving it. This helper runs once per theme change and exits, so a device
-    whose effects live in firmware -- Logitech's, notably -- reverts to whatever
-    is stored there, typically a rainbow cycle. Static writes to onboard memory
-    instead, so it survives the helper exiting.
+    Why Static for some devices: Direct is a live mode, driven by the host for
+    as long as it keeps writing. This helper runs once per theme change and
+    exits, so on a device whose effects live in firmware Direct either reverts
+    to the stored effect once the writer goes away -- Logitech's keyboard, back
+    to its rainbow -- or never renders the full chain in the first place. MSI's
+    ARGB headers do the latter: Direct streams per-LED and the board drops the
+    tail of the chain, so case fans daisy-chained off JRAINBOW sit dark while
+    the rest of the board takes the colour. Static hands the chain to the
+    board's own MCU, which drives all of it.
 
-    One invocation covers every device, since -d can repeat with its own mode
-    and colour. Devices are addressed by index because a name that matches
-    nothing aborts the whole command.
+    Why one invocation rather than a global Direct pass plus a Static
+    correction: on those MSI headers Direct is not merely the wrong colour, it
+    is no colour, so the two-pass version blinked the fans off for as long as
+    the second invocation took to connect -- about a second. -d repeats with its
+    own mode and colour, so a single command covers both sets at once.
+
+    assignments of None means the device listing was unavailable; fall back to
+    the global pass, which addresses every device without needing indices.
     """
-    if not devices:
-        return 0
-
     command = ["openrgb"]
-    for index, _ in devices:
-        command += [
-            "--device", str(index), "--mode", "static", "--color", hex_color,
-        ]
+
+    if assignments is None:
+        command += ["--mode", "direct", "--color", hex_color]
+        if brightness is not None:
+            command += ["--brightness", str(brightness)]
+        return command
+
+    # Devices are addressed by index because openrgb's own -d name search needs
+    # three characters, can match more than one device, and hard-fails the whole
+    # invocation on a miss.
+    for index, mode in assignments:
+        command += ["--device", str(index), "--mode", mode, "--color", hex_color]
         if brightness is not None:
             command += ["--brightness", str(brightness)]
 
-    if dry_run:
-        print(" ".join(command))
-        return 0
-
-    result = subprocess.run(
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
-    if result.returncode != 0:
-        sys.stderr.write(result.stdout)
-    return result.returncode
+    return command
 
 
-def apply(hex_color, brightness, dry_run):
+def plan(records, patterns):
+    """Pair every detected device with the mode it should be sent.
+
+    Returns None when the listing could not be read, which sends the caller
+    down the global-Direct fallback.
+    """
+    if records is None:
+        return None
+
+    for record in stale_devices(records):
+        sys.stderr.write(
+            f"openrgb is holding a stale handle for {record['name']!r}: "
+            f"{record['location']} no longer exists. Colours are being "
+            "accepted and discarded; the server needs to re-detect. "
+            "Fix with: systemctl --user restart openrgb-server.service\n"
+        )
+
+    matched, missing = match_devices(records, patterns)
+    for pattern in missing:
+        sys.stderr.write(
+            f"staticDevices: no connected device matches {pattern!r}\n"
+        )
+
+    static = {index for index, _ in matched}
+    return [
+        (record["index"], "static" if record["index"] in static else "direct")
+        for record in records
+    ]
+
+
+def apply(hex_color, brightness, assignments, dry_run):
     # No --client flag: bare openrgb autoconnects to a local server already, and
     # passing --client on top of that connects twice and applies to every device
     # twice over. Without a server this falls back to direct hardware access,
     # which still works -- it just pays for a full SMBus rescan each time.
-    command = ["openrgb", "--mode", "direct", "--color", hex_color]
-    if brightness is not None:
-        command += ["--brightness", str(brightness)]
+    command = build_command(hex_color, brightness, assignments)
 
     if dry_run:
         print(" ".join(command))
@@ -314,11 +347,11 @@ def main():
     # the default value"; the shell.json entry fills in whatever is left.
     parser.add_argument(
         "--min-sat", type=float,
-        help="saturation floor, 0-1 (default: 0.7)",
+        help="bottom of the remapped saturation range, 0-1 (default: 0.55)",
     )
     parser.add_argument(
         "--min-val", type=float,
-        help="brightness floor in HSV, 0-1 (default: 1.0)",
+        help="bottom of the remapped HSV brightness range, 0-1 (default: 0.65)",
     )
     parser.add_argument(
         "--no-saturate", action="store_true",
@@ -374,36 +407,16 @@ def main():
         print(f"{source} -> #{final}")
         return 0
 
-    code = apply(final, config["brightness"], args.dry_run)
+    # The device listing is only needed to address devices individually, which
+    # is only needed when some of them want a mode other than Direct. Without
+    # staticDevices the global pass is already correct, and skipping the listing
+    # keeps the common case at a single openrgb invocation.
+    assignments = None
+    if config["staticDevices"]:
+        assignments = plan(inventory(), config["staticDevices"])
 
-    # Static runs after the global Direct pass, so the devices that need it
-    # overwrite what Direct just set rather than racing it. A failure here is
-    # reported but does not mask a successful Direct pass for everything else.
-    if code == 0 and config["staticDevices"]:
-        records = inventory()
-        if records is None:
-            return code
-
-        for record in stale_devices(records):
-            sys.stderr.write(
-                f"openrgb is holding a stale handle for {record['name']!r}: "
-                f"{record['location']} no longer exists. Colours are being "
-                "accepted and discarded; the server needs to re-detect. "
-                "Fix with: systemctl --user restart openrgb-server.service\n"
-            )
-
-        matched, missing = match_devices(records, config["staticDevices"])
-        for pattern in missing:
-            sys.stderr.write(
-                f"staticDevices: no connected device matches {pattern!r}\n"
-            )
-        static_code = apply_static(
-            final, config["brightness"], matched, args.dry_run
-        )
-        if static_code != 0:
-            sys.stderr.write(
-                f"staticDevices: static pass failed ({static_code})\n"
-            )
+    # apply() has already written openrgb's own output to stderr on a failure.
+    code = apply(final, config["brightness"], assignments, args.dry_run)
 
     # Report the colour that actually reached the hardware, post-saturation, so
     # the QML service can record that rather than the raw accent it asked for.

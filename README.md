@@ -141,11 +141,20 @@ stale config.
 
 ### staticDevices
 
-Direct is a live mode: the device holds the colour only while a host keeps
-driving it. This helper runs once per theme change and exits, so a device whose
-effects live in firmware reverts to whatever is stored there — usually a rainbow
-cycle. Naming it here sends `Static` as well, which writes to onboard memory and
-survives the helper exiting.
+Direct is a live mode, driven by the host for as long as it keeps writing. This
+helper runs once per theme change and exits, which breaks two kinds of device:
+
+- **Firmware effects take back over.** Logitech keyboards revert to whatever is
+  stored onboard, usually a rainbow cycle, the moment the writer goes away.
+- **The chain never fully lights.** MSI's ARGB headers stream per-LED in Direct
+  and the board drops the tail of the chain, so case fans daisy-chained off
+  JRAINBOW sit *dark* while the CPU cooler and everything else on the same board
+  take the colour correctly. This reads as "the plugin didn't fire", but the
+  server has the right colour buffered for every LED — the board just isn't
+  driving them.
+
+Naming a device here sends it `Static` instead, which writes to onboard memory
+and hands the chain to the board's own MCU.
 
 Entries are case-insensitive substrings matched against device names as
 `openrgb --list-devices` reports them, so `"logitech g pro rgb"` is enough, and
@@ -154,9 +163,24 @@ indices, because OpenRGB numbers devices in detection order and an index moves
 when unrelated hardware comes or goes. A pattern matching nothing is reported
 and skipped rather than failing the apply.
 
+Everything goes out in one `openrgb` invocation, with `-d` repeated per device
+so Direct and Static devices are set together. An earlier version ran a global
+Direct pass and then corrected the Static devices, which blinked the MSI fans
+off for the second it took to reconnect.
+
 Empty by default: Static costs an onboard flash write per theme change, so this
 is opt-in per device rather than the default for everything. Logitech keyboards
-are the known case that needs it.
+and MSI motherboard ARGB headers are the known cases that need it.
+
+The author's machine, as a worked example — a G Pro that would otherwise cycle,
+and a B760-P whose JRAINBOW fans would otherwise stay dark:
+
+```json
+"staticDevices": [
+  "Logitech G Pro RGB Mechanical Gaming Keyboard",
+  "MSI PRO B760-P WIFI"
+]
+```
 
 ## Commands
 
