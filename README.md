@@ -3,6 +3,69 @@
 Paints every OpenRGB device with the current Omarchy theme's accent colour.
 One colour across all devices — no per-device mapping to maintain.
 
+## Install
+
+Needs Omarchy with `omarchy-shell`, and the `openrgb` package.
+
+The directory name must match the `id` in `manifest.json` — the shell keys
+plugins by it, so a differently named clone will not load:
+
+```bash
+git clone https://github.com/perfektnacht/openrgb-theme-plugin \
+  ~/.config/omarchy/plugins/perfektnacht.openrgb-theme
+
+omarchy restart shell
+```
+
+That is enough to work. Theme switches now repaint on every change, but each one
+pays for a full SMBus rescan — several seconds. The SDK server below brings that
+down to ~35 ms.
+
+### The SDK server
+
+Not packaged with Omarchy; create the user unit yourself. No root required *if*
+your user can already reach the hardware — see the permissions note below.
+
+```ini
+# ~/.config/systemd/user/openrgb-server.service
+[Unit]
+Description=OpenRGB SDK server (user session)
+Documentation=https://openrgb.org/
+After=graphical-session.target
+
+[Service]
+Type=simple
+# --noautoconnect: this process *is* the server; without it OpenRGB also tries
+# to connect to a server on startup.
+ExecStart=/usr/bin/openrgb --server --noautoconnect
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now openrgb-server
+```
+
+### Hardware permissions
+
+Whether a non-root user can drive the devices varies by machine and by which
+buses your hardware sits on. Motherboard and DRAM RGB usually go over SMBus,
+which typically wants the `i2c-dev` module loaded and your user in a group with
+access to `/dev/i2c-*`; USB peripherals go over hidraw and are usually fine
+already. If devices show up in `openrgb --list-devices` but colours never land,
+this is the first thing to check — OpenRGB's own
+[udev rules](https://openrgb.org/) documentation covers the per-vendor detail.
+
+Verify without touching hardware:
+
+```bash
+~/.config/omarchy/plugins/perfektnacht.openrgb-theme/bin/omarchy-openrgb-theme --dry-run
+```
+
 ## How it works
 
 `Color.accent` is a live property on the shell's `qs.Commons` singleton, and the
@@ -92,8 +155,8 @@ every apply.
 
 ## The server
 
-A user-level systemd unit, no root required — direct hardware access already
-works for this user via existing i2c and hidraw permissions.
+A user-level systemd unit — see [Install](#the-sdk-server) for the unit file and
+the permissions it assumes.
 
 ```bash
 systemctl --user status openrgb-server
