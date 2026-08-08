@@ -20,7 +20,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 
@@ -31,12 +30,18 @@ SHELL_CONFIG = os.path.expanduser("~/.config/omarchy/shell.json")
 PLUGIN_ID = "perfektnacht.openrgb-theme"
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 6742
+# What the openrgb client prints once it has reached a running server; its
+# absence is how a fallback to direct hardware access is detected.
+SERVER_BANNER = "Connected to server"
 
 DEFAULTS = {
     "saturate": True,
     "minSaturation": 0.7,
     "minValue": 1.0,
     "brightness": None,
+    # Empty by default: Static costs an onboard flash write per theme change,
+    # so which devices need it is a per-machine decision. See apply_static.
+    "staticDevices": [],
 }
 
 
@@ -70,6 +75,11 @@ def settings():
                 values[key] = float(entry[key])
         if isinstance(entry.get("brightness"), int):
             values["brightness"] = entry["brightness"]
+        if isinstance(entry.get("staticDevices"), list):
+            values["staticDevices"] = [
+                item for item in entry["staticDevices"]
+                if isinstance(item, str) and item.strip()
+            ]
         break
 
     return values
@@ -115,10 +125,129 @@ def to_hex(rgb):
     return "".join(f"{round(channel * 255):02X}" for channel in rgb)
 
 
-def server_running():
-    with socket.socket() as probe:
-        probe.settimeout(0.25)
-        return probe.connect_ex((SERVER_HOST, SERVER_PORT)) == 0
+def inventory():
+    """Every detected device as an (index, name, location) record.
+
+    One --list-devices call serves both the name matching and the staleness
+    check below, so neither costs an extra connection. Returns None when the
+    listing could not be read at all.
+    """
+    result = subprocess.run(
+        ["openrgb", "--list-devices"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+        return None
+
+    # Device headers sit at column 0 as "<index>: <name>"; every detail line for
+    # a device is indented, and the client's own chatter is not digit-prefixed.
+    header = re.compile(r"^(\d+):[ \t]+(.+)$")
+    # Only HID locations name a file we can check. DRAM sits behind an I2C
+    # address, which is not a path and says nothing about handle validity.
+    location = re.compile(r"^\s+Location:\s*HID:\s*(\S+)")
+
+    records = []
+    for line in result.stdout.splitlines():
+        found = header.match(line)
+        if found:
+            records.append({
+                "index": int(found.group(1)),
+                "name": found.group(2).strip(),
+                "location": None,
+            })
+            continue
+        if not records:
+            continue
+        found = location.match(line)
+        if found:
+            records[-1]["location"] = found.group(1)
+
+    return records
+
+
+def stale_devices(records):
+    """Devices whose cached HID node has since disappeared.
+
+    OpenRGB opens an LED interface once at detection and holds the descriptor
+    for the life of the server. When USB re-enumerates -- connecting a gamepad
+    is enough -- the node can return under a new number, and writes to the old
+    one are accepted and silently discarded: the server goes on reporting the
+    mode it believes it set while the hardware runs its stored effect, which
+    looks exactly like the plugin not working.
+
+    Not every controller reports a location (Logitech's keyboard does not), so a
+    missing one is not evidence of a problem and is skipped. A device that does
+    report a dead path is evidence the server's whole detection pass is stale.
+    """
+    return [
+        record for record in records
+        if record["location"] and not os.path.exists(record["location"])
+    ]
+
+
+def match_devices(records, patterns):
+    """Resolve name substrings to device indices.
+
+    Matching on names rather than indices is deliberate: OpenRGB numbers devices
+    in detection order, so an index moves when unrelated hardware comes or goes.
+    Indices are then read back out of the same listing, which avoids openrgb's
+    own `-d "name"` search -- that needs three characters, can match more than
+    one device, and hard-fails the entire invocation on a miss.
+
+    Returns (matched, missing): pairs of (index, name), and the patterns that
+    matched nothing so the caller can say so.
+    """
+    matched = {}
+    missing = []
+    for pattern in patterns:
+        needle = pattern.lower()
+        hits = [
+            (record["index"], record["name"]) for record in records
+            if needle in record["name"].lower()
+        ]
+        if hits:
+            matched.update(dict.fromkeys(hits))
+        else:
+            missing.append(pattern)
+
+    return sorted(matched), missing
+
+
+def apply_static(hex_color, brightness, devices, dry_run):
+    """Re-send the colour as Static to devices that will not hold Direct.
+
+    Direct is a live mode: the device shows the colour only while a host keeps
+    driving it. This helper runs once per theme change and exits, so a device
+    whose effects live in firmware -- Logitech's, notably -- reverts to whatever
+    is stored there, typically a rainbow cycle. Static writes to onboard memory
+    instead, so it survives the helper exiting.
+
+    One invocation covers every device, since -d can repeat with its own mode
+    and colour. Devices are addressed by index because a name that matches
+    nothing aborts the whole command.
+    """
+    if not devices:
+        return 0
+
+    command = ["openrgb"]
+    for index, _ in devices:
+        command += [
+            "--device", str(index), "--mode", "static", "--color", hex_color,
+        ]
+        if brightness is not None:
+            command += ["--brightness", str(brightness)]
+
+    if dry_run:
+        print(" ".join(command))
+        return 0
+
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+    return result.returncode
 
 
 def apply(hex_color, brightness, dry_run):
@@ -139,6 +268,20 @@ def apply(hex_color, brightness, dry_run):
     )
     if result.returncode != 0:
         sys.stderr.write(result.stdout)
+        return result.returncode
+
+    # Whether we reached the server is read off the client's own output rather
+    # than probed beforehand. A pre-flight connect() that never sends the ORGB
+    # magic makes the server log "recv_select failed receiving magic" on every
+    # apply -- the probe was doubling this plugin's contribution to the journal
+    # for information the client already reports.
+    if SERVER_BANNER not in result.stdout:
+        sys.stderr.write(
+            "openrgb server not reachable on "
+            f"{SERVER_HOST}:{SERVER_PORT}; fell back to direct access "
+            "(slow)\n"
+        )
+
     return result.returncode
 
 
@@ -213,14 +356,43 @@ def main():
         print(f"{source} -> #{final}")
         return 0
 
-    if not args.dry_run and not server_running():
-        sys.stderr.write(
-            "openrgb server not reachable on "
-            f"{SERVER_HOST}:{SERVER_PORT}; falling back to direct access "
-            "(slow)\n"
-        )
+    code = apply(final, config["brightness"], args.dry_run)
 
-    return apply(final, config["brightness"], args.dry_run)
+    # Static runs after the global Direct pass, so the devices that need it
+    # overwrite what Direct just set rather than racing it. A failure here is
+    # reported but does not mask a successful Direct pass for everything else.
+    if code == 0 and config["staticDevices"]:
+        records = inventory()
+        if records is None:
+            return code
+
+        for record in stale_devices(records):
+            sys.stderr.write(
+                f"openrgb is holding a stale handle for {record['name']!r}: "
+                f"{record['location']} no longer exists. Colours are being "
+                "accepted and discarded; the server needs to re-detect. "
+                "Fix with: systemctl --user restart openrgb-server.service\n"
+            )
+
+        matched, missing = match_devices(records, config["staticDevices"])
+        for pattern in missing:
+            sys.stderr.write(
+                f"staticDevices: no connected device matches {pattern!r}\n"
+            )
+        static_code = apply_static(
+            final, config["brightness"], matched, args.dry_run
+        )
+        if static_code != 0:
+            sys.stderr.write(
+                f"staticDevices: static pass failed ({static_code})\n"
+            )
+
+    # Report the colour that actually reached the hardware, post-saturation, so
+    # the QML service can record that rather than the raw accent it asked for.
+    if code == 0 and not args.dry_run:
+        print(final)
+
+    return code
 
 
 if __name__ == "__main__":

@@ -21,6 +21,11 @@ Item {
 
   readonly property string helper: Qt.resolvedUrl("bin/omarchy-openrgb-theme").toString().replace("file://", "")
 
+  // lastRequested is the theme accent this asked for; lastApplied is what the
+  // helper reports actually reaching the LEDs, which differs whenever the
+  // saturation floor kicks in. Reporting the request as the result made a
+  // pastel theme look like it had been sent verbatim.
+  property string lastRequested: ""
   property string lastApplied: ""
   property bool applyPending: false
 
@@ -39,7 +44,7 @@ Item {
     var hex = accentHex()
     if (!hex || hex === "000000") return
 
-    root.lastApplied = hex
+    root.lastRequested = hex
 
     // Coalesce: a theme switch can retint several properties in one tick, and
     // openrgb is a single-writer path. Let the in-flight write finish, then
@@ -67,7 +72,14 @@ Item {
 
   Process {
     id: applyProcess
-    stdout: StdioCollector { waitForEnd: true }
+    stdout: StdioCollector {
+      waitForEnd: true
+      // The helper prints the post-saturation colour on a successful apply.
+      onStreamFinished: {
+        var out = text.trim()
+        if (/^[0-9A-Fa-f]{6}$/.test(out)) root.lastApplied = out.toUpperCase()
+      }
+    }
     stderr: StdioCollector {
       waitForEnd: true
       onStreamFinished: if (text.length > 0) console.warn("openrgb-theme:", text.trim())
@@ -90,14 +102,17 @@ Item {
 
     // Reapply on demand -- useful from a resume hook, since Direct mode does
     // not survive a suspend on every device.
+    // Returns the requested colour, not the applied one: the helper only
+    // reports what it sent once it has exited, which is after this returns.
     function apply(): string {
       root.apply()
-      return root.lastApplied
+      return root.lastRequested
     }
 
     function status(): string {
       return JSON.stringify({
         accent: root.accentHex(),
+        lastRequested: root.lastRequested,
         lastApplied: root.lastApplied
       })
     }

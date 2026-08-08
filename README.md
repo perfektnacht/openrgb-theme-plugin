@@ -115,7 +115,8 @@ stale config.
   "saturate": true,
   "minSaturation": 0.7,
   "minValue": 1.0,
-  "brightness": 100
+  "brightness": 100,
+  "staticDevices": ["Logitech G Pro RGB Mechanical Gaming Keyboard"]
 }
 ```
 
@@ -125,6 +126,26 @@ stale config.
 | `minSaturation` | `0.7` | Saturation floor, 0–1 |
 | `minValue` | `1.0` | HSV brightness floor, 0–1 |
 | `brightness` | unset | Device brightness percentage, 0–100, where supported |
+| `staticDevices` | `[]` | Devices to send `Static` instead of `Direct` — see below |
+
+### staticDevices
+
+Direct is a live mode: the device holds the colour only while a host keeps
+driving it. This helper runs once per theme change and exits, so a device whose
+effects live in firmware reverts to whatever is stored there — usually a rainbow
+cycle. Naming it here sends `Static` as well, which writes to onboard memory and
+survives the helper exiting.
+
+Entries are case-insensitive substrings matched against device names as
+`openrgb --list-devices` reports them, so `"logitech g pro rgb"` is enough, and
+`"logitech"` would catch a keyboard and mouse together. Names rather than
+indices, because OpenRGB numbers devices in detection order and an index moves
+when unrelated hardware comes or goes. A pattern matching nothing is reported
+and skipped rather than failing the apply.
+
+Empty by default: Static costs an onboard flash write per theme change, so this
+is opt-in per device rather than the default for everything. Logitech keyboards
+are the known case that needs it.
 
 ## Commands
 
@@ -192,3 +213,33 @@ work. The list is what has actually had a colour put on it, not a limit.
   this to; a systemd `system-sleep` script would need root.
 - **The DRAM sticks are the flaky path.** SMBus writes can contend with other
   tooling touching i2c.
+- **The server goes stale when USB re-enumerates.** OpenRGB opens each LED
+  interface once at detection and holds the descriptor for the life of the
+  server. Connecting a gamepad is enough to make a node come back under a new
+  number, and writes to the old one are then accepted and silently discarded —
+  the server keeps reporting the mode it believes it set while the hardware runs
+  its stored effect. It looks exactly like this plugin not working. Fix:
+
+  ```bash
+  systemctl --user restart openrgb-server.service
+  ```
+
+  The helper warns about this when it can, by checking the `Location` paths in
+  `--list-devices` against what exists. Note that not every controller reports a
+  location — the Logitech keyboard does not — so detection leans on the devices
+  that do. If a re-enumeration moves *only* an unreported device, the check stays
+  silent.
+
+## Debugging
+
+Quickshell sends stdout and stderr to `/dev/null`, so the service's
+`console.warn` output never reaches `journalctl`. Warnings land in Quickshell's
+own log instead:
+
+```bash
+qs log --pid $(pgrep -f 'quickshell -n -p') -t 100
+```
+
+Anything from this plugin is prefixed `openrgb-theme:`. Running
+`bin/omarchy-openrgb-theme` directly is the other way to see them, since the
+helper writes its warnings to stderr.
