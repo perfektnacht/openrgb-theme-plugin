@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """Paint every OpenRGB device with a single colour derived from the Omarchy theme.
 
-Reads the active theme's `accent` unless a colour is given explicitly, applies a
-saturation floor so the result survives the trip to an LED, and pushes it to all
-devices in Direct mode.
+Reads the active theme's `accent` unless a colour is given explicitly, lifts it
+into a range an LED can actually render, and pushes it to all devices in Direct
+mode.
 
-Why the saturation floor: RGB LEDs desaturate hard at brightness, so a pastel
-that reads as blue on a monitor renders as dim white on a keyboard. Roughly a
-third of the stock themes ship an accent below 0.35 saturation. Raising S while
-preserving H keeps each theme recognisably itself without going neon.
+Why lift at all: RGB LEDs desaturate hard at brightness, so a pastel that reads
+as blue on a monitor renders as dim white on a keyboard. Roughly a third of the
+stock themes ship an accent below 0.35 saturation.
 
-Greys (S == 0, e.g. the `vantablack` and `white` themes) are left uncoloured on
-purpose -- there is no hue to recover, and white is the honest answer there.
+Why lift by remapping rather than clamping: a hard `max(S, floor)` throws away
+every distinction below the floor, and with V pinned to 1.0 the entire output
+collapsed onto a single ring where only hue survived. Fourteen of the 22 stock
+accents sit in the 130-240 degree arc, so neighbouring themes came out visually
+identical -- `lumon` and `solitude` landed 4 dE76 apart, which reads as "the
+theme changed but the LEDs didn't". Remapping S and V into [floor, 1] instead
+keeps the ordering, so two themes that differ on screen still differ on the
+hardware.
+
+Greys (S == 0, e.g. the `vantablack` and `white` themes) keep their hue-less
+neutrality on purpose -- there is no hue to recover -- but still get the
+brightness lift, which is what keeps them apart from each other.
 """
 
 import argparse
@@ -36,8 +45,11 @@ SERVER_BANNER = "Connected to server"
 
 DEFAULTS = {
     "saturate": True,
-    "minSaturation": 0.7,
-    "minValue": 1.0,
+    # Both are the bottom of a remapped range, not a clamp -- see adjust(). They
+    # sit below the old clamp values (0.7 / 1.0) because the headroom above them
+    # is what carries one theme's accent away from the next one's.
+    "minSaturation": 0.55,
+    "minValue": 0.65,
     "brightness": None,
     # Empty by default: Static costs an onboard flash write per theme change,
     # so which devices need it is a per-machine decision. See apply_static.
@@ -109,14 +121,20 @@ def parse_hex(value):
 
 
 def adjust(rgb, min_sat, min_val):
-    """Apply the saturation floor and value floor, preserving hue."""
+    """Lift S and V into [floor, 1], preserving hue and relative ordering.
+
+    The remap is a plain lerp: 0 lands on the floor, 1 stays at 1. Every input
+    still clears the floor -- that is the whole point of the floor -- but the
+    distance between two accents is compressed rather than erased, so themes
+    that differ only in how washed-out they are stay distinguishable.
+    """
     hue, sat, val = colorsys.rgb_to_hsv(*rgb)
 
-    # A pure grey carries no hue. Boosting S would invent a colour the theme
-    # never chose, so only the brightness floor applies.
+    # A pure grey carries no hue. Lifting S would invent a colour the theme
+    # never chose, so only the brightness lift applies.
     if sat > 0:
-        sat = max(sat, min_sat)
-    val = max(val, min_val)
+        sat = min_sat + sat * (1.0 - min_sat)
+    val = min_val + val * (1.0 - min_val)
 
     return colorsys.hsv_to_rgb(hue, sat, val)
 

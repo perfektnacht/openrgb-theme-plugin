@@ -83,20 +83,31 @@ RGB LEDs desaturate hard at brightness: a pastel that reads as blue on a monitor
 renders as dim white on a keyboard. Eight of the 22 stock themes ship an accent
 below 0.35 saturation.
 
-The helper converts to HSV, raises S to a floor (default `0.7`), pushes V to
-full, and converts back. Hue is untouched, so each theme stays recognisably
-itself:
+The helper converts to HSV and remaps S into `[minSaturation, 1]` and V into
+`[minValue, 1]` — a lerp, not a clamp. Hue is untouched, so each theme stays
+recognisably itself:
 
 | Theme | Accent | Applied |
 |---|---|---|
-| solitude | `#798186` (sat 0.10) | `#4DBAFF` |
-| tokyo-night | `#7aa2f7` (sat 0.51) | `#4D86FF` |
-| kanagawa | `#dcd7ba` (sat 0.15) | `#FFE54D` |
-| matte-black | `#e68e0d` (sat 0.94) | `#FF9D0E` |
-| vantablack | `#8d8d8d` (sat 0.00) | `#FFFFFF` |
+| solitude | `#798186` (sat 0.10) | `#56A4D5` |
+| tokyo-night | `#7aa2f7` (sat 0.51) | `#3877FC` |
+| kanagawa | `#dcd7ba` (sat 0.15) | `#F3DD5C` |
+| matte-black | `#e68e0d` (sat 0.94) | `#F69506` |
+| vantablack | `#8d8d8d` (sat 0.00) | `#D7D7D7` |
 
-Pure greys are left alone on purpose — there is no hue to recover, and white is
-the honest answer for the `vantablack` and `white` themes.
+Pure greys keep their neutrality on purpose — there is no hue to recover — but
+they still take the brightness lift, which is what keeps `vantablack` and
+`white` apart.
+
+**Why a lerp and not a clamp.** The first version used `max(S, 0.7)` with V
+pinned to `1.0`. That put every theme on a single ring of the colour solid where
+only hue survived, and 14 of the 22 stock accents live in the 130–240° arc — so
+adjacent themes came out visually identical and a theme switch looked like the
+plugin had simply not fired. The worst offenders were `lumon` → `#4DC0FF` and
+`solitude` → `#4DBAFF`, 4.1 dE76 apart. Remapping preserves ordering, so
+anything that differs on screen differs on the hardware: that pair is now 11.4
+apart, and the only remaining sub-5 pair is `vantablack` / `white`, which really
+are just two greys.
 
 ## Settings
 
@@ -113,8 +124,8 @@ stale config.
 {
   "id": "perfektnacht.openrgb-theme",
   "saturate": true,
-  "minSaturation": 0.7,
-  "minValue": 1.0,
+  "minSaturation": 0.55,
+  "minValue": 0.65,
   "brightness": 100,
   "staticDevices": ["Logitech G Pro RGB Mechanical Gaming Keyboard"]
 }
@@ -123,8 +134,8 @@ stale config.
 | Key | Default | Meaning |
 |---|---|---|
 | `saturate` | `true` | Set `false` to send the theme colour untouched |
-| `minSaturation` | `0.7` | Saturation floor, 0–1 |
-| `minValue` | `1.0` | HSV brightness floor, 0–1 |
+| `minSaturation` | `0.55` | Bottom of the remapped saturation range, 0–1 |
+| `minValue` | `0.65` | Bottom of the remapped HSV brightness range, 0–1 |
 | `brightness` | unset | Device brightness percentage, 0–100, where supported |
 | `staticDevices` | `[]` | Devices to send `Static` instead of `Direct` — see below |
 
