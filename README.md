@@ -6,23 +6,41 @@ colour across all devices — no per-device mapping to maintain.
 
 ## Install
 
-Needs Omarchy with `omarchy-shell`, and the `openrgb` package.
-
-The directory name must match the `id` in `manifest.json` — the shell keys
-plugins by it, so a differently named clone will not load:
-
 ```bash
 git clone https://github.com/perfektnacht/openrgb-theme-plugin \
-  ~/.config/omarchy/plugins/perfektnacht.openrgb-theme
-
-omarchy restart shell
+  ~/.config/omarchy/plugins/perfektnacht.openrgb-theme && omarchy restart shell
 ```
 
-That is enough to work. Theme switches now repaint on every change, but each one
-pays for a full SMBus rescan — several seconds. The SDK server below brings that
-down to ~35 ms.
+Needs Omarchy with `omarchy-shell`, and the `openrgb` package. The directory
+name must match the `id` in `manifest.json` — the shell keys plugins by it, so a
+differently named clone will not load.
 
-### The SDK server
+That is enough to work. Theme switches now repaint on every change, but each one
+pays for a full SMBus rescan — several seconds. [The SDK
+server](#the-sdk-server) brings that down to ~35 ms.
+
+## Update
+
+```bash
+git -C ~/.config/omarchy/plugins/perfektnacht.openrgb-theme pull && omarchy restart shell
+```
+
+## Remove
+
+```bash
+rm -rf ~/.config/omarchy/plugins/perfektnacht.openrgb-theme && omarchy restart shell
+```
+
+Devices keep whatever colour was last written until something else drives them.
+If you also created the SDK server unit and want it gone:
+
+```bash
+systemctl --user disable --now openrgb-server
+rm ~/.config/systemd/user/openrgb-server.service
+systemctl --user daemon-reload
+```
+
+## The SDK server
 
 Not packaged with Omarchy; create the user unit yourself. No root required *if*
 your user can already reach the hardware — see the permissions note below.
@@ -51,7 +69,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now openrgb-server
 ```
 
-### Hardware permissions
+## Hardware permissions
 
 Whether a non-root user can drive the devices varies by machine and by which
 buses your hardware sits on. Motherboard and DRAM RGB usually go over SMBus,
@@ -268,10 +286,10 @@ omarchy restart shell
 Editing `bin/omarchy-openrgb-theme` needs no restart — it is re-executed on
 every apply.
 
-## The server
+## Checking the server
 
-A user-level systemd unit — see [Install](#the-sdk-server) for the unit file and
-the permissions it assumes.
+A user-level systemd unit — see [The SDK server](#the-sdk-server) for the unit
+file and the permissions it assumes.
 
 ```bash
 systemctl --user status openrgb-server
