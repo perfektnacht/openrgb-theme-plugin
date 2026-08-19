@@ -356,6 +356,33 @@ Anything from this plugin is prefixed `openrgb-theme:`. Running
 `bin/omarchy-openrgb-theme` directly is the other way to see them, since the
 helper writes its warnings to stderr.
 
+## Security
+
+Reviewed against the [Omarchy Plugin Marketplace][mp]'s pre-submission security
+scan on 19 August 2026, at commit `42a2b76`.
+
+**This is a self-review, not a marketplace audit.** Nobody from the marketplace
+has reviewed this repository. Omarchy plugins run unsandboxed as upstream code,
+so no scan — this one included — makes a plugin safe. It is published so you can
+check the claims rather than take them.
+
+**No code changes were needed.** What the scan confirmed:
+
+- The only network activity is the loopback connection to the OpenRGB SDK
+  server on `127.0.0.1:6742`. Nothing leaves the machine.
+- Every external command is a `subprocess.run([...])` argument array. There is
+  no `shell=True` and no shell string anywhere.
+- It writes no files at all. It reads three: `colors.toml`, `theme.name` and
+  `shell.json`.
+- The theme name is used only as a lookup key — never a path, a command, or
+  text rendered on screen.
+
+Found something this missed? Report it privately through the marketplace's
+[security policy][sec], or open an issue here.
+
+[mp]: https://github.com/HANCORE-linux/omarchy-plugin-marketplace
+[sec]: https://github.com/HANCORE-linux/omarchy-plugin-marketplace/blob/main/SECURITY.md
+
 ## License
 
 MIT — see [LICENSE](LICENSE). No third-party code is bundled or vendored here;
@@ -373,4 +400,3 @@ It drives software you install yourself, and does not redistribute any of it:
 The only network activity is that loopback connection to the OpenRGB SDK
 server. Nothing leaves the machine, and the plugin writes no files — it reads
 `colors.toml`, `theme.name` and `shell.json`, and nothing else.
-
