@@ -355,3 +355,22 @@ qs log --pid $(pgrep -f 'quickshell -n -p') -t 100
 Anything from this plugin is prefixed `openrgb-theme:`. Running
 `bin/omarchy-openrgb-theme` directly is the other way to see them, since the
 helper writes its warnings to stderr.
+
+## License
+
+MIT — see [LICENSE](LICENSE). No third-party code is bundled or vendored here;
+the plugin is a QML service plus one Python helper, both written for it.
+
+It drives software you install yourself, and does not redistribute any of it:
+
+| Dependency | Licence | Role |
+|------------|---------|------|
+| [OpenRGB](https://openrgb.org) | GPL-2.0-or-later | The `openrgb` client and the SDK server this talks to on `127.0.0.1:6742` |
+| Omarchy 4+ | MIT | Plugin host, and the source of the theme this follows |
+| Quickshell | LGPL-3.0-only | QML runtime, used through imports as a system library |
+| Python 3 | PSF-2.0 | Runs `bin/omarchy-openrgb-theme` |
+
+The only network activity is that loopback connection to the OpenRGB SDK
+server. Nothing leaves the machine, and the plugin writes no files — it reads
+`colors.toml`, `theme.name` and `shell.json`, and nothing else.
+
